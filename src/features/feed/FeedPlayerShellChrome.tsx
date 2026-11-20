@@ -131,7 +131,7 @@ export function FeedPlayerShellChrome({
           nextDisabled={!(swipeEp && episodes.some((e) => e.ep_num === curEp + 1)) && index >= effectiveLength - 1}
           nextTitle={swipeEp && episodes.some((e) => e.ep_num === curEp + 1) ? tr("下一集 ↓") : tr("下一部 ↓")}
           swipeEp={swipeEp}
-          onToggleSwipe={() => { const next = !swipeEp; setSwipeEp(next); toast(next ? tr("上下划切集已开启") : tr("上下划切集已关闭"), "info", "swipe-toggle"); }}
+          onToggleSwipe={() => { const next = !swipeEp; setSwipeEp(next); toast(next ? tr("上下划切集已开启") : tr("上下划切集已关闭"), "info", "playback-hint"); }}
           onToggle={() => videoRef.current?.toggle()}
           onSeek={(t, source) => { videoRef.current?.seek(t, source); playbackClock.publish(t); }}
           onSeekInteraction={(phase, input, target, pointerTarget) => videoRef.current?.trace(`seek.input.${phase}`, { input, target, pointer_target: pointerTarget })}
@@ -147,7 +147,7 @@ export function FeedPlayerShellChrome({
               const nx = episodes.find((e) => e.ep_num === curEp + 1);
               if (nx) {
                 pickEp(nx.ep_num);
-                toast(tr("第 {0}集{1}", nx.ep_num, episodes.length ? ` / ${episodes.length}` : ""), "info", "episode");
+                toast(tr("第 {0}集{1}", nx.ep_num, episodes.length ? ` / ${episodes.length}` : ""), "info", "playback-hint");
                 return;
               }
             }

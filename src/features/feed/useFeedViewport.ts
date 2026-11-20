@@ -169,13 +169,13 @@ export function useFeedViewport({
       const ep = epMap[curId] || 1;
       const result = resolveFullscreenEpisodeSwipe(ep, totalEpisodes, dir === 1 ? -1 : 1);
       if (result && "message" in result) {
-        toast?.(result.message, "info", "episode");
+        toast?.(result.message, "info", "playback-hint");
         return;
       }
       if (result) {
         setEpMap((m) => ({ ...m, [curId]: result.target }));
         setPanel(null);
-        toast?.(tr("第 {0}集{1}", result.target, totalEpisodes ? ` / ${totalEpisodes}` : ""), "info", "episode");
+        toast?.(tr("第 {0}集{1}", result.target, totalEpisodes ? ` / ${totalEpisodes}` : ""), "info", "playback-hint");
         return;
       }
     }
@@ -185,7 +185,7 @@ export function useFeedViewport({
       if (want) {
         setEpMap((m) => ({ ...m, [curId]: want }));
         setPanel(null);
-        toast?.(tr("第 {0}集{1}", want, totalEpisodes ? ` / ${totalEpisodes}` : ""), "info", "episode");
+        toast?.(tr("第 {0}集{1}", want, totalEpisodes ? ` / ${totalEpisodes}` : ""), "info", "playback-hint");
         return;
       }
     }

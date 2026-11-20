@@ -285,12 +285,48 @@ async function episodeToastChecks(page) {
     const v = document.querySelector("video");
     return v && v.videoWidth === 320 && v.videoHeight === 180 && v.currentTime > .2 && !v.paused;
   });
+  const portraitSwipe = dy => page.evaluate(deltaY => {
+    const surface = document.querySelector("[data-mobile-hold-target]");
+    const box = surface.getBoundingClientRect();
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    surface.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 122, pointerType: "touch", isPrimary: true, button: 0, buttons: 1, clientX: x, clientY: y }));
+    surface.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 122, pointerType: "touch", isPrimary: true, button: 0, buttons: 1, clientX: x, clientY: y + deltaY }));
+    surface.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 122, pointerType: "touch", isPrimary: true, button: 0, buttons: 0, clientX: x, clientY: y + deltaY }));
+  }, dy);
+  const waitToastGone = () => page.waitForFunction(() => document.querySelectorAll(".a-toast").length === 0, null, { timeout: 5000 });
+  const assertVideoAnchored = async toast => {
+    const box = await toast.boundingBox();
+    const viewport = await page.evaluate(() => innerHeight);
+    assert(box, "Hint must be measurable");
+    assert(box.y + box.height < viewport - 150, "Portrait feed hint must sit above the screen bottom");
+    assert(await toast.evaluate(el => !!el.closest(".player-root")), "Portrait feed hint must stay inside the player stage");
+  };
+  const assertRotatedBottom = async toast => {
+    const [box, viewport] = await Promise.all([toast.boundingBox(), page.evaluate(() => innerHeight)]);
+    assert(box, "Rotated hint must be measurable");
+    assert(box.y + box.height > viewport - 200, "Rotated hint must sit at the physical screen bottom, not a side edge");
+    assert(await toast.evaluate(el => !!el.closest(".player-root.fs-landscape")), "Rotated hint must stay inside the rotated stage");
+  };
+
   await dismissGuide();
   await waitForPlayback();
+
+  // Episode hint waits for the incoming source, then appears at the video bottom.
+  await portraitSwipe(-120);
+  const portraitToast = page.locator(".a-toast").filter({ hasText: /第 2 ?集 \/ 3/ });
+  await page.waitForTimeout(350);
+  assert.equal(await portraitToast.count(), 0, "Portrait hint must not flash while the next video is loading");
+  await page.evaluate(() => window.__releasePlay());
+  await waitForPlayback();
+  await portraitToast.waitFor();
+  assert.equal(await portraitToast.count(), 1, "Portrait hint must appear once the next video starts playing");
+  await assertVideoAnchored(portraitToast);
+  await waitToastGone();
+
   await page.getByRole("button", { name: "全屏", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".player-root")?.classList.contains("fs-landscape"));
-  const toast = page.locator(".a-toast").filter({ hasText: /第 2 ?集 \/ 3/ });
-  // The rotated stage maps a rightward screen drag to a swipe-up in video space.
+  assert.equal(await page.locator(".mobile-video-episode").count(), 0, "Fullscreen must not render the portrait episode badge");
+  const toast = page.locator(".a-toast").filter({ hasText: /第 3 ?集 \/ 3/ });
   await page.evaluate(() => {
     const surface = document.querySelector("[data-mobile-hold-target]");
     const box = surface.getBoundingClientRect();
@@ -300,15 +336,28 @@ async function episodeToastChecks(page) {
     surface.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 121, pointerType: "touch", isPrimary: true, button: 0, buttons: 1, clientX: x1, clientY: y }));
     surface.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 121, pointerType: "touch", isPrimary: true, button: 0, buttons: 0, clientX: x1, clientY: y }));
   });
-  await page.waitForTimeout(350);
-  assert.equal(await toast.count(), 0, "Episode hint must wait while the next video is still loading");
-  await page.evaluate(() => window.__releasePlay());
+  await toast.waitFor();
   await waitForPlayback();
   await page.waitForFunction(() => document.querySelector(".player-root")?.classList.contains("fs-landscape"));
-  await toast.waitFor();
-  assert.equal(await toast.count(), 1, "Episode hint must appear once the next video starts playing");
-  assert(await toast.evaluate(el => !!el.closest(".player-root.fs-landscape")), "Episode hint must land in the rotated landscape stage");
-  return { deferredWhileLoading: true, host: "rotated-stage", text: (await toast.innerText()).trim() };
+  assert.equal(await toast.count(), 1, "Landscape hint must appear once the next video starts playing");
+  await assertRotatedBottom(toast);
+
+  // A last-episode boundary must replace the same hint card, not stack below it.
+  await page.evaluate(() => {
+    const surface = document.querySelector("[data-mobile-hold-target]");
+    const box = surface.getBoundingClientRect();
+    const y = box.y + box.height / 2;
+    const x0 = box.x + box.width * .3, x1 = box.x + box.width * .7;
+    surface.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 123, pointerType: "touch", isPrimary: true, button: 0, buttons: 1, clientX: x0, clientY: y }));
+    surface.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 123, pointerType: "touch", isPrimary: true, button: 0, buttons: 1, clientX: x1, clientY: y }));
+    surface.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 123, pointerType: "touch", isPrimary: true, button: 0, buttons: 0, clientX: x1, clientY: y }));
+  });
+  const lastToast = page.locator(".a-toast").filter({ hasText: /当前已是最后一集/ });
+  await lastToast.waitFor();
+  assert.equal(await page.locator(".a-toast").count(), 1, "Boundary hint must replace the episode hint instead of stacking");
+  await assertRotatedBottom(lastToast);
+  const lastBox = await lastToast.boundingBox();
+  return { deferredWhileLoading: true, portraitAnchor: true, boundaryReplaces: true, rotatedBottom: true, noPortraitEpisodeBadge: true, host: "rotated-stage", text: (await lastToast.innerText()).trim(), box: lastBox };
 }
 
 // Ambient glow is a sampled color wash behind the video. It must follow the

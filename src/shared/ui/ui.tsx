@@ -65,11 +65,20 @@ export function ToastHost() {
   const [fsHost, setFsHost] = useState<Element | null>(() => getFullscreenElement());
   useEffect(() => onFullscreenChange(() => setFsHost(getFullscreenElement())), []);
   /* The CSS-rotated landscape stage is itself a rotated coordinate system. Portalling
-     the host into it keeps episode hints at the bottom of the video, not the viewport. */
+     the host into it keeps episode hints at the bottom of the video, not the viewport.
+     In a portrait feed, the player root carries the visible video-bottom inset. */
   const rotatedHost = fsHost ? null : document.querySelector(".player-root.fs-landscape");
-  const host = fsHost || rotatedHost;
+  /* Only playback hints follow the player stage in a portrait feed. Toasts from
+     Settings, likes, comments and other pages keep the normal viewport anchor. */
+  const playbackHint = toasts.some((t) => t.tag === "playback-hint");
+  const playerHost = fsHost || rotatedHost || !playbackHint ? null : document.querySelector('.player-root:not([aria-hidden="true"])');
+  const host = fsHost || rotatedHost || playerHost;
   const content = (
-    <div role="status" aria-live="polite" aria-atomic="true" className="ios-toast-host absolute inset-x-0 z-[300] flex flex-col items-center gap-2 pointer-events-none px-6" style={{ bottom: rotatedHost ? "96px" : "calc(var(--sab, 0px) + 96px)" }}>
+    <div role="status" aria-live="polite" aria-atomic="true"
+      className={`ios-toast-host absolute z-[300] flex flex-col items-center gap-2 pointer-events-none px-6 ${rotatedHost ? "inset-y-0 justify-center" : "inset-x-0"}`}
+      style={rotatedHost
+        ? { right: "96px", left: "auto", top: 0, bottom: 0, maxWidth: 360 }
+        : { bottom: "var(--player-toast-bottom, calc(var(--sab, 0px) + 96px))" }}>
       {toasts.map((t) =>
         t.line ? (
           <div

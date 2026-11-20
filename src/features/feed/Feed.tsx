@@ -1,6 +1,6 @@
 import { Button, Image } from "../../shared/ui/ios/controls";
 import { Loader } from "../../shared/ui/ios/effects";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { api, cover, isMobile, logLine } from "../../shared/api/api";
 import type { Detail, Episode, PlayInfo, Post, VideoCard } from "../../shared/api/types";
@@ -163,7 +163,7 @@ export default function Feed({
   const lockControls = () => {
     setPanel(null);
     setControlsLocked(true);
-    toast(tr("已锁定屏幕"), "info", "screen-lock");
+    toast(tr("已锁定屏幕"), "info", "playback-hint");
   };
   const togglePlayback = useCallback(() => {
     videoRef.current?.toggle();
@@ -172,7 +172,7 @@ export default function Feed({
   const toggleSwipeEp = () => {
     const next = !swipeEp;
     setSwipeEp(next);
-    toast(next ? tr("上下划切集已开启") : tr("上下划切集已关闭"), "info", "swipe-toggle");
+    toast(next ? tr("上下划切集已开启") : tr("上下划切集已关闭"), "info", "playback-hint");
   };
 
   useEffect(() => { setTagMenu(false); setTagSelection([]); }, [curId, store.lineEpoch, accountScope]);
@@ -209,28 +209,23 @@ export default function Feed({
   const playUrl = preferHevc && hevcUrl ? hevcUrl : mainUrl;
   const measurementKey = JSON.stringify([accountScope, store.lineEpoch, permissionKey, playKey, playUrl]);
   const videoSize = vsize.key === measurementKey ? vsize : { key: measurementKey, w: 0, h: 0 };
-  /* A fullscreen episode swap has no decoded frame yet, so the landscape stage
-     is not rotated. Hold the episode hint until the next source actually plays. */
-  const pendingEpisodeToast = useRef<string | null>(null);
-  const showEpisodeToast = useCallback((msg: string, immediate = false) => {
-    if (immediate || isDesktop || !fs) { toast(msg, "info", "episode"); return; }
-    pendingEpisodeToast.current = msg;
-  }, [fs, isDesktop, toast]);
+  /* Keep episode and lock hints in one slot, and wait for the incoming source to
+     expose its aspect ratio before showing a hint. In portrait feeds this lets the
+     hint anchor to the landscape video area instead of flashing at the screen bottom. */
+  const [pendingEpisodeToast, setPendingEpisodeToast] = useState<string | null>(null);
+  const showEpisodeToast = useCallback((msg: string) => {
+    setPendingEpisodeToast(msg);
+  }, []);
   useEffect(() => {
-    const pending = pendingEpisodeToast.current;
-    if (!pending) return;
-    if (err) { pendingEpisodeToast.current = null; return; }
-    if (!fs || isDesktop) {
-      pendingEpisodeToast.current = null;
-      toast(pending, "info", "episode");
-      return;
-    }
-    // Wait for the new playback, not the previous frame: the rotated stage is
-    // only valid after its own dimensions and first playing frame are known.
-    if (playingKey !== playKey || videoSize.key !== measurementKey || videoSize.h <= 0) return;
-    pendingEpisodeToast.current = null;
-    toast(pending, "info", "episode");
-  }, [err, fs, isDesktop, measurementKey, playKey, playingKey, toast, videoSize]);
+    if (!pendingEpisodeToast) return;
+    if (err) { setPendingEpisodeToast(null); return; }
+    /* Wait for the incoming source's decoded size, not a play event: identical
+       URLs may not fire a second playing event, while the stage rotation only
+       depends on the measured aspect ratio. */
+    if (videoSize.key !== measurementKey || videoSize.h <= 0 || videoSize.w <= 0) return;
+    setPendingEpisodeToast(null);
+    toast(pendingEpisodeToast, "info", "playback-hint");
+  }, [err, measurementKey, pendingEpisodeToast, toast, videoSize]);
   // 等播放画面就绪再提示，启动动画/协议、加载失败和其他面板不叠加教程。
   const showHoldGuide = !isDesktop && !holdGuide.seen && active && allowed
     && !!playUrl && duration > 0 && !err && !panel && !tagMenu && !controlsLocked;
@@ -341,6 +336,12 @@ export default function Feed({
   /* 沉浸全屏 + 横屏视频 → 舞台旋转 90°，看起来就是横屏 */
   const rotated = !isDesktop && fs && videoSize.w > videoSize.h && videoSize.h > 0 && !vpLandscape;
   const landscapeVideo = videoSize.w > 0 && videoSize.h > 0 && videoSize.w > videoSize.h;
+  /* In a portrait feed a landscape video is letterboxed. Keep player hints at the
+     bottom of the visible video, so they do not jump when the stage rotates. */
+  const toastBottom = !isDesktop && landscapeVideo && !fs && !vpLandscape && portraitFit === "contain"
+    ? `calc(var(--sab, 0px) + 96px + (100vh - 100vw * ${(videoSize.h / videoSize.w).toFixed(4)}) / 2)`
+    : undefined;
+  const playerRootStyle = toastBottom ? ({ "--player-toast-bottom": toastBottom } as CSSProperties) : undefined;
 
   const {
     zoom, setZoom, holdSpeed, holdSlow,
@@ -613,6 +614,7 @@ export default function Feed({
   return (
     <div
       ref={playerRootRef}
+      style={playerRootStyle}
       className={`hg-player-ui ${rotated ? "fs-landscape" : (!isDesktop && fs ? "fs-immersive" : "absolute inset-0")} overflow-hidden bg-black player-root ${controlsLocked ? "is-locked" : ""} ${isDesktop ? "player-surface" : ""} ${theater ? "is-theater" : ""} ${isDesktop && idle ? "is-idle" : ""}`}
       data-clean={clean}
       inert={!active || undefined}
@@ -753,12 +755,12 @@ export default function Feed({
       <TagBlockMenu open={active && tagMenu} tags={meta.tags} initialSelected={tagSelection} onClose={() => setTagMenu(false)} onSettings={openPreferences} />
       {!isDesktop && <MobileHoldGuide open={showHoldGuide} onClose={holdGuide.dismiss} target={holdTargetRef} bottomInset={bottomInset} />}
       {controlsLocked && <PlaybackLock active={active} rotated={rotated} immersive={!isDesktop && fs && !rotated} hideUnlockUntilTapped={!isDesktop}
-        onBlocked={() => toast(tr("轻触即可解锁"), "info", "screen-lock")}
+        onBlocked={() => toast(tr("轻触即可解锁"), "info", "playback-hint")}
         onUnlock={() => {
           setControlsLocked(false);
           setClean(false);
           wake();
-          toast(tr("已解锁"), "info", "screen-lock");
+          toast(tr("已解锁"), "info", "playback-hint");
         }} />}
     </div>
   );

@@ -37,8 +37,8 @@ type Args = {
   setPanel: Dispatch<SetStateAction<FeedPanel>>;
   setTagMenu: Dispatch<SetStateAction<boolean>>;
   toast: (msg: string, icon?: Toast["icon"], tag?: string) => void;
-  /** Episode changes may need to wait for the next frame to settle the landscape stage. */
-  episodeToast: (msg: string, immediate?: boolean) => void;
+  /** Episode hints wait for the incoming source so they never flash at the portrait anchor. */
+  episodeToast: (msg: string) => void;
 };
 
 export function useFeedTouchGestures({
@@ -228,8 +228,8 @@ export function useFeedTouchGestures({
         if (fs && kind === "video") {
           const result = resolveFullscreenEpisodeSwipe(ep, total, dy);
           if (result && "message" in result) {
-            /* Reuse the episode toast slot so repeated boundary swipes replace instead of stack. */
-            episodeToast(result.message, true);
+            /* Reuse the playback hint slot so repeated boundary swipes replace instead of stack. */
+            episodeToast(result.message);
             return;
           }
           if (result) {
