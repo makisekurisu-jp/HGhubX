@@ -202,7 +202,7 @@ export default function Settings({ onBack, initialSection }: { onBack: () => voi
               <span className="ios-setting-icon"><IVol size={16} /></span>
               <div className="flex-1 min-w-0">
                 <div className="text-[14px] text-on">{tr("平衡音量")}</div>
-                <div className="text-[12px] text-mut">{tr("自动压低突然变大的音效，让台词更稳；音乐和现场内容可能被轻微压缩")}</div>
+                <div className="text-[12px] text-mut">{tr("按人耳响度自动拉平不同视频的音量，保留对白动态；音乐和现场内容可能被轻微压缩")}</div>
               </div>
               <Toggle desktop on={balanceVolume} onChange={setBalanceVolume} label={tr("平衡音量")} />
             </div>}

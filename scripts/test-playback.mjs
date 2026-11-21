@@ -78,7 +78,7 @@ const getLogs = page => page.evaluate(async () => { await window.playerSeekFixtu
 // 本地 VOD HLS fixture：testsrc2 + 正弦音轨。size 决定横屏（320x180）或竖屏（360x640）源。
 const generateHlsFixture = (dir, size) => execFileSync(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${size}:rate=15`, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "90", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", "-hls_segment_filename", join(dir, "seg%03d.ts"), join(dir, "list.m3u8")], { timeout: 60000, stdio: "pipe" });
 // Two steady tones about 36 dB apart: the audio graph must bring both to the same output RMS.
-function balanceFixtureWav(seconds = 24, sampleRate = 22050) {
+function balanceFixtureWav(seconds = 24, sampleRate = 22050, bass = false) {
   const frames = sampleRate * seconds;
   const data = Buffer.alloc(44 + frames * 2);
   data.write("RIFF", 0); data.writeUInt32LE(36 + frames * 2, 4); data.write("WAVE", 8);
@@ -88,7 +88,11 @@ function balanceFixtureWav(seconds = 24, sampleRate = 22050) {
   data.writeUInt32LE(frames * 2, 40);
   for (let i = 0; i < frames; i += 1) {
     const amplitude = i < sampleRate * 10 ? 0.012 : 0.8;
-    const sample = Math.sin((2 * Math.PI * 440 * i) / sampleRate) * amplitude;
+    const wave = Math.sin((2 * Math.PI * 440 * i) / sampleRate);
+    const mixed = bass
+      ? 0.72 * Math.sin((2 * Math.PI * 60 * i) / sampleRate) + 0.28 * wave
+      : wave;
+    const sample = mixed * amplitude;
     data.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample * 32767))), 44 + i * 2);
   }
   return data.toString("base64");
@@ -137,6 +141,18 @@ async function balanceVolumeChecks(page) {
   await page.evaluate(() => window.__balanceProbe.seek(12));
   await page.waitForTimeout(4500);
   const loud = await page.evaluate(() => window.__balanceProbe.metrics());
+
+  // A fixed per-track gain is the NewTube path: one constant gain, no AGC.
+  await page.evaluate(() => window.__balanceProbe.setFixedGain(-6));
+  await page.waitForTimeout(1200);
+  const fixed = await page.evaluate(() => window.__balanceProbe.metrics());
+  assert.ok(Math.abs(fixed.gainDb + 6) < 0.2, `Fixed gain must apply exactly: ${fixed.gainDb} dB`);
+  assert.ok(Math.abs(fixed.desiredDb + 6) < 0.2, `Fixed desired gain must be -6 dB: ${fixed.desiredDb} dB`);
+
+  // Return to auto and let the first valid block choose the loud-track gain again.
+  await page.evaluate(() => window.__balanceProbe.setFixedGain(null));
+  await page.waitForTimeout(1200);
+  const restored = await page.evaluate(() => window.__balanceProbe.metrics());
   await page.evaluate(() => window.__balanceProbe.setVolume(0.2));
   await page.waitForTimeout(2500);
   const lowered = await page.evaluate(() => window.__balanceProbe.metrics());
@@ -147,12 +163,31 @@ async function balanceVolumeChecks(page) {
   assert.ok(quiet.desiredDb > 10, "Quiet source must receive substantial boost");
   assert.ok(loud.desiredDb < 0, "Loud source must be attenuated");
   assert.ok(quiet.outputPeakDb < -1.4 && loud.outputPeakDb < -1.4, "Output peaks must stay under the limiter ceiling");
-  assert.ok(lowered.outputDb <= loud.outputDb - 12 && lowered.outputDb >= loud.outputDb - 17, `Manual volume must stay authoritative: ${loud.outputDb} -> ${lowered.outputDb}`);
+  assert.ok(lowered.outputDb <= restored.outputDb - 12 && lowered.outputDb >= restored.outputDb - 17, `Manual volume must stay authoritative: ${restored.outputDb} -> ${lowered.outputDb}`);
+
+  // Bass-heavy material is the case the NewPipe PR reviewers heard distort. K-weighting
+  // must still converge the same content at two very different levels without clipping.
+  await page.evaluate(() => window.__balanceProbe.setVolume(1));
+  await page.evaluate(src => window.__balanceProbe.load(src), `data:audio/wav;base64,${balanceFixtureWav(24, 22050, true)}`);
+  await page.click("#start");
+  await page.waitForFunction(() => window.__balanceProbe.isStarted() && document.querySelector("video")?.currentTime > 1);
+  await page.evaluate(() => window.__balanceProbe.seek(3));
+  await page.waitForTimeout(4500);
+  const bassQuiet = await page.evaluate(() => window.__balanceProbe.metrics());
+  await page.evaluate(() => window.__balanceProbe.seek(12));
+  await page.waitForTimeout(4500);
+  const bassLoud = await page.evaluate(() => window.__balanceProbe.metrics());
+  assert.ok(Math.abs(bassLoud.outputDb - bassQuiet.outputDb) <= 1.5, `Bass-heavy quiet ${bassQuiet.outputDb} dB and loud ${bassLoud.outputDb} dB must converge within 1.5 dB`);
+  assert.ok(bassQuiet.outputPeakDb < -1.4 && bassLoud.outputPeakDb < -1.4, "Bass-heavy output peaks must stay under the limiter ceiling");
+
   return {
     attached: true, state: "on",
     quiet_db: Math.round(quiet.outputDb * 10) / 10,
     loud_db: Math.round(loud.outputDb * 10) / 10,
+    fixed_gain_db: Math.round(fixed.gainDb * 10) / 10,
     lowered_db: Math.round(lowered.outputDb * 10) / 10,
+    bass_quiet_db: Math.round(bassQuiet.outputDb * 10) / 10,
+    bass_loud_db: Math.round(bassLoud.outputDb * 10) / 10,
     quiet_gain_db: Math.round(quiet.desiredDb * 10) / 10,
     loud_gain_db: Math.round(loud.desiredDb * 10) / 10,
   };

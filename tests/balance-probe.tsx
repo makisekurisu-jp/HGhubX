@@ -22,6 +22,7 @@ startButton.addEventListener("click", async () => {
   seek,
   metrics: () => getBalanceVolumeMetrics(audio),
   setVolume: (volume: number) => { audio.volume = volume; },
+  setFixedGain: (db: number | null) => { setBalanceVolume(audio, true, { fixedGainDb: db }); },
   checkOpaqueGuard: (crossOriginSrc: string) => {
     const crossOriginVideo = document.createElement("video");
     crossOriginVideo.preload = "none";

@@ -1,13 +1,12 @@
-import Hls from "hls.js";
-
 /**
  * App-level loudness leveling for HTML video playback.
  *
- * Video sources can differ by 20 dB or more. The graph measures the source level
- * before processing, applies a slow RMS gain toward a fixed target, and uses a
- * limiter to keep peaks from clipping. The element's volume and mute state stay
- * authoritative: the gain target is compensated by the element volume, so
- * lowering the user volume still lowers the output.
+ * The Web Audio graph keeps a dry path for instant bypass and a wet path through
+ * an AudioWorklet. The worklet measures BS.1770 K-weighted loudness with 400 ms
+ * and 3 s windows, applies a slow gain toward the configured LUFS target, and
+ * runs a 5 ms look-ahead limiter. A fixed per-track gain can be supplied when a
+ * source exposes loudness metadata; that is the NewTube rule: one constant gain
+ * per audio track, with the user volume kept separate.
  *
  * Safety boundary: MediaElementAudioSourceNode permanently routes a <video>'s
  * audio into Web Audio and outputs silence if the media element is CORS-opaque
@@ -15,28 +14,31 @@ import Hls from "hls.js";
  * readable blob:/data:/same-origin/CORS stream.
  */
 
+import Hls from "hls.js";
+
+const WORKLET_URL = new URL("./balanceVolumeProcessor.js", import.meta.url).href;
+
+type MetricsMessage = {
+  type: "metrics";
+  inputDb?: number;
+  gainDb?: number;
+  desiredDb?: number;
+  reductionDb?: number;
+};
+
 type Chain = {
   ctx: AudioContext;
   video: HTMLVideoElement;
   source: MediaElementAudioSourceNode;
-  agc: GainNode;
-  limiter: DynamicsCompressorNode;
-  inputAnalyser: AnalyserNode;
-  outputAnalyser: AnalyserNode;
   dry: GainNode;
   wet: GainNode;
-  inputBuffer: Float32Array<ArrayBuffer>;
+  outputAnalyser: AnalyserNode;
   outputBuffer: Float32Array<ArrayBuffer>;
-  timer: number;
-  resetTimer: number;
+  worklet: AudioWorkletNode | null;
   enabled: boolean;
-  initialized: boolean;
-  levelDb: number | null;
-  lastGainDb: number;
-  inputDb: number | null;
-  outputDb: number | null;
-  outputPeakDb: number | null;
-  desiredDb: number;
+  options: Required<BalanceVolumeOptions>;
+  metrics: MetricsMessage | null;
+  resetTimer: number;
 };
 
 export type BalanceVolumeMetrics = {
@@ -50,25 +52,37 @@ export type BalanceVolumeMetrics = {
   reductionDb: number;
 };
 
-const TARGET_RMS_DB = -19;
-const GATE_DB = -55;
-const MAX_BOOST_DB = 28;
-const MAX_CUT_DB = -18;
-const DEADBAND_DB = 0.5;
-const LEVEL_RISE_ALPHA = 0.12;
-const LEVEL_FALL_ALPHA = 0.06;
-const AGC_INTERVAL_MS = 50;
-const ATTACK_SECONDS = 0.4;
-const RELEASE_SECONDS = 1.2;
+export type BalanceVolumeOptions = {
+  /** Target loudness in LUFS. Default -18; clamped to -24..-14. */
+  targetLufs?: number;
+  /** Fraction of the error to correct. Default 1; clamped to 0.4..1. */
+  strength?: number;
+  /** Optional constant per-track gain in dB. Null means use the auto leveler. */
+  fixedGainDb?: number | null;
+  /** Maximum auto boost in dB. Default 28; clamped to 0..30. */
+  maxBoostDb?: number;
+  /** Maximum auto cut in dB. Default -18; clamped to -30..0. */
+  maxCutDb?: number;
+};
+
+const DEFAULT_OPTIONS: Required<BalanceVolumeOptions> = {
+  targetLufs: -18,
+  strength: 1,
+  fixedGainDb: null,
+  maxBoostDb: 28,
+  maxCutDb: -18,
+};
+
 const CROSSFADE_SECONDS = 0.2;
-const LIMITER_CEIL_DB = -1.5;
-const PEAK_MARGIN_DB = 1;
+const WORKLET_NAME = "hghub-balance-volume";
 
 const chains = new WeakMap<HTMLVideoElement, Chain>();
 const wanted = new WeakMap<HTMLVideoElement, boolean>();
+const desiredOptions = new WeakMap<HTMLVideoElement, Required<BalanceVolumeOptions>>();
 const pending = new WeakMap<HTMLVideoElement, () => void>();
 const pendingSource = new WeakMap<HTMLVideoElement, () => void>();
 const attachedRefs: WeakRef<HTMLVideoElement>[] = [];
+const workletModules = new WeakMap<AudioContext, Promise<void>>();
 let sharedContext: AudioContext | null = null;
 let suspendTimer = 0;
 
@@ -81,29 +95,12 @@ function audioContextCtor(): typeof AudioContext | null {
 
 /** True when the runtime supports MSE + Web Audio leveling (hides toggle on iOS native AVPlayer). */
 export function isBalanceVolumeSupported(): boolean {
-  return Boolean(audioContextCtor()) && Hls.isSupported();
+  return Boolean(audioContextCtor())
+    && typeof AudioWorkletNode !== "undefined"
+    && Hls.isSupported();
 }
 
-function createContext(): AudioContext | null {
-  const Ctor = audioContextCtor();
-  if (!Ctor) return null;
-  try { return new Ctor({ latencyHint: "interactive" }); }
-  catch {
-    try { return new Ctor(); }
-    catch { return null; }
-  }
-}
-
-function getContext(): AudioContext | null {
-  if (sharedContext?.state === "closed") sharedContext = null;
-  if (!sharedContext) sharedContext = createContext();
-  return sharedContext;
-}
-
-function setState(video: HTMLVideoElement, state: BalanceVolumeMetrics["state"]) {
-  video.dataset.balanceVolume = state;
-}
-
+/** Reject opaque sources before createMediaElementSource permanently silences the element. */
 function canSampleElementAudio(video: HTMLVideoElement): "ready" | "empty" | "opaque" {
   const current = video.currentSrc || video.src;
   if (!current) return "empty";
@@ -138,18 +135,53 @@ function scheduleContextIdleCheck(ctx: AudioContext) {
   }, 320);
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function numberOption(value: number | undefined, fallback: number, min: number, max: number) {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : fallback;
+}
+
+function normalizeOptions(options?: BalanceVolumeOptions): Required<BalanceVolumeOptions> {
+  return {
+    targetLufs: numberOption(options?.targetLufs, DEFAULT_OPTIONS.targetLufs, -24, -14),
+    strength: numberOption(options?.strength, DEFAULT_OPTIONS.strength, 0.4, 1),
+    fixedGainDb: typeof options?.fixedGainDb === "number" && Number.isFinite(options.fixedGainDb)
+      ? options.fixedGainDb
+      : null,
+    maxBoostDb: numberOption(options?.maxBoostDb, DEFAULT_OPTIONS.maxBoostDb, 0, 30),
+    maxCutDb: numberOption(options?.maxCutDb, DEFAULT_OPTIONS.maxCutDb, -30, 0),
+  };
+}
+
+function createContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const Ctor = window.AudioContext
+    ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return null;
+  try { return new Ctor({ latencyHint: "interactive" }); }
+  catch {
+    try { return new Ctor(); }
+    catch { return null; }
+  }
+}
+
+function getContext(): AudioContext | null {
+  if (sharedContext?.state === "closed") sharedContext = null;
+  if (!sharedContext) sharedContext = createContext();
+  return sharedContext;
+}
+
+function setState(video: HTMLVideoElement, state: BalanceVolumeMetrics["state"]) {
+  video.dataset.balanceVolume = state;
+}
+
 function ramp(param: AudioParam, value: number, ctx: AudioContext) {
   const now = ctx.currentTime;
   param.cancelScheduledValues(now);
   param.setValueAtTime(param.value, now);
   param.linearRampToValueAtTime(value, now + CROSSFADE_SECONDS);
-}
-
-function stopTimer(chain: Chain) {
-  if (chain.timer) {
-    window.clearInterval(chain.timer);
-    chain.timer = 0;
-  }
 }
 
 function levelsFromBuffer(analyser: AnalyserNode, buffer: Float32Array<ArrayBuffer>) {
@@ -168,67 +200,33 @@ function levelsFromBuffer(analyser: AnalyserNode, buffer: Float32Array<ArrayBuff
   };
 }
 
-function resetAnalysis(chain: Chain) {
-  chain.initialized = false;
-  chain.levelDb = null;
-  chain.lastGainDb = 0;
+function loadWorkletModule(ctx: AudioContext) {
+  let promise = workletModules.get(ctx);
+  if (!promise) {
+    // A same-origin asset is allowed by the Tauri CSP (`script-src 'self'`).
+    // Blob URLs are intentionally avoided: they would need a `blob:` script-src.
+    promise = ctx.audioWorklet.addModule(WORKLET_URL);
+    workletModules.set(ctx, promise);
+  }
+  return promise;
 }
 
-function tick(chain: Chain) {
-  if (!chain.enabled || chain.ctx.state !== "running" || chain.video.paused || chain.video.seeking) return;
-  if (chain.video.muted || chain.video.volume <= 0) return;
-
-  const volumeDb = 20 * Math.log10(chain.video.volume);
-  const input = levelsFromBuffer(chain.inputAnalyser, chain.inputBuffer);
-  /* Remove the element-volume gain before comparing sources. The target then stays
-     relative to the user's volume instead of boosting quiet playback back up. */
-  const contentDb = input.rmsDb - volumeDb;
-  const contentPeakDb = input.peakDb - volumeDb;
-  if (contentDb < GATE_DB) {
-    chain.inputDb = null;
-    return;
-  }
-
-  if (chain.levelDb === null) chain.levelDb = contentDb;
-  else {
-    const alpha = contentDb > chain.levelDb ? LEVEL_RISE_ALPHA : LEVEL_FALL_ALPHA;
-    chain.levelDb += alpha * (contentDb - chain.levelDb);
-  }
-
-  /* Keep boosted peaks below the limiter ceiling so quiet, high-crest sources
-     do not turn into clipped distortion. */
-  const peakCapDb = LIMITER_CEIL_DB - PEAK_MARGIN_DB - contentPeakDb;
-  const desiredGainDb = Math.max(
-    MAX_CUT_DB,
-    Math.min(MAX_BOOST_DB, TARGET_RMS_DB - chain.levelDb, peakCapDb),
-  );
-  chain.desiredDb = desiredGainDb;
-  const now = chain.ctx.currentTime;
-  if (!chain.initialized) {
-    chain.agc.gain.cancelScheduledValues(now);
-    chain.agc.gain.setValueAtTime(10 ** (desiredGainDb / 20), now);
-    chain.lastGainDb = desiredGainDb;
-    chain.initialized = true;
-  } else if (Math.abs(desiredGainDb - chain.lastGainDb) >= DEADBAND_DB) {
-    const attack = desiredGainDb < chain.lastGainDb;
-    chain.agc.gain.cancelScheduledValues(now);
-    chain.agc.gain.setTargetAtTime(
-      10 ** (desiredGainDb / 20),
-      now,
-      attack ? ATTACK_SECONDS : RELEASE_SECONDS,
-    );
-    chain.lastGainDb = desiredGainDb;
-  }
-
-  chain.inputDb = contentDb;
-  const output = levelsFromBuffer(chain.outputAnalyser, chain.outputBuffer);
-  chain.outputDb = output.rmsDb;
-  chain.outputPeakDb = output.peakDb;
+function configure(chain: Chain) {
+  chain.worklet?.port.postMessage({
+    type: "configure",
+    target: chain.options.targetLufs,
+    strength: chain.options.strength,
+    volume: chain.video.volume,
+    active: chain.enabled && !chain.video.paused && !chain.video.muted && !chain.video.seeking,
+    fixedGainDb: chain.options.fixedGainDb,
+    maxBoostDb: chain.options.maxBoostDb,
+    maxCutDb: chain.options.maxCutDb,
+  });
 }
 
-function startTimer(chain: Chain) {
-  if (chain.timer) return;
-  chain.timer = window.setInterval(() => tick(chain), AGC_INTERVAL_MS);
+function resetWorklet(chain: Chain) {
+  chain.worklet?.port.postMessage({ type: "reset" });
+  chain.metrics = null;
 }
 
 function enableChain(chain: Chain) {
@@ -241,8 +239,14 @@ function enableChain(chain: Chain) {
     window.clearTimeout(chain.resetTimer);
     chain.resetTimer = 0;
   }
-  resetAnalysis(chain);
-  if (!chain.video.paused) startTimer(chain);
+  if (!chain.worklet) {
+    // The module is still loading. Keep the dry path audible until it is ready.
+    setState(chain.video, "pending");
+    void chain.ctx.resume().catch(() => {});
+    return;
+  }
+  resetWorklet(chain);
+  configure(chain);
   ramp(chain.dry.gain, 0, chain.ctx);
   ramp(chain.wet.gain, 1, chain.ctx);
   setState(chain.video, "on");
@@ -254,14 +258,11 @@ function disableChain(chain: Chain) {
   ramp(chain.dry.gain, 1, chain.ctx);
   ramp(chain.wet.gain, 0, chain.ctx);
   setState(chain.video, "off");
-  stopTimer(chain);
   if (chain.resetTimer) window.clearTimeout(chain.resetTimer);
   chain.resetTimer = window.setTimeout(() => {
     chain.resetTimer = 0;
-    const now = chain.ctx.currentTime;
-    chain.agc.gain.cancelScheduledValues(now);
-    chain.agc.gain.setValueAtTime(1, now);
-    resetAnalysis(chain);
+    resetWorklet(chain);
+    configure(chain);
     scheduleContextIdleCheck(chain.ctx);
   }, 300);
 }
@@ -279,11 +280,11 @@ function clearPending(video: HTMLVideoElement) {
   }
 }
 
-function waitForReadableSource(video: HTMLVideoElement, ctx: AudioContext) {
+function waitForReadableSource(video: HTMLVideoElement, ctx: AudioContext, options: Required<BalanceVolumeOptions>) {
   if (pendingSource.has(video)) return;
   const onSource = () => {
     cleanup();
-    if (wanted.get(video)) attach(video, ctx);
+    if (wanted.get(video)) void attach(video, ctx, desiredOptions.get(video) ?? options);
   };
   const cleanup = () => {
     video.removeEventListener("loadedmetadata", onSource);
@@ -295,7 +296,7 @@ function waitForReadableSource(video: HTMLVideoElement, ctx: AudioContext) {
   pendingSource.set(video, cleanup);
 }
 
-function waitForGesture(video: HTMLVideoElement, ctx: AudioContext) {
+function waitForGesture(video: HTMLVideoElement, ctx: AudioContext, options: Required<BalanceVolumeOptions>) {
   if (pending.has(video)) return;
   let done = false;
   const events = ["pointerdown", "keydown", "touchend"] as const;
@@ -308,21 +309,32 @@ function waitForGesture(video: HTMLVideoElement, ctx: AudioContext) {
     cleanup();
     pending.delete(video);
     void ctx.resume().then(() => {
-      if (wanted.get(video)) attach(video, ctx);
+      if (wanted.get(video)) void attach(video, ctx, desiredOptions.get(video) ?? options);
     }).catch(() => { /* Leave the dry path active; the setting stays pending. */ });
   };
   for (const event of events) document.addEventListener(event, unlock, true);
   pending.set(video, cleanup);
 }
 
-function attach(video: HTMLVideoElement, ctx: AudioContext) {
+function readMetrics(value: unknown): MetricsMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const data = value as MetricsMessage;
+  if (data.type !== "metrics") return null;
+  return data;
+}
+
+async function attach(video: HTMLVideoElement, ctx: AudioContext, options: Required<BalanceVolumeOptions>) {
   if (!wanted.get(video)) return;
   const existing = chains.get(video);
-  if (existing) { enableChain(existing); return; }
+  if (existing) {
+    existing.options = options;
+    enableChain(existing);
+    return;
+  }
 
   const eligibility = canSampleElementAudio(video);
   if (eligibility === "empty") {
-    waitForReadableSource(video, ctx);
+    waitForReadableSource(video, ctx, options);
     return;
   }
   if (eligibility === "opaque") {
@@ -332,80 +344,115 @@ function attach(video: HTMLVideoElement, ctx: AudioContext) {
   }
   clearPending(video);
 
+  let source: MediaElementAudioSourceNode;
   try {
-    const source = ctx.createMediaElementSource(video);
+    source = ctx.createMediaElementSource(video);
+  } catch {
+    setState(video, "unsupported");
+    return;
+  }
 
-    /* Measure the source before applying gain so the level target is stable. */
-    const inputAnalyser = ctx.createAnalyser();
-    inputAnalyser.fftSize = 2048;
-    inputAnalyser.smoothingTimeConstant = 0;
-    source.connect(inputAnalyser);
+  const dry = ctx.createGain();
+  dry.gain.value = 1;
+  const wet = ctx.createGain();
+  wet.gain.value = 0;
+  const outputAnalyser = ctx.createAnalyser();
+  outputAnalyser.fftSize = 2048;
+  outputAnalyser.smoothingTimeConstant = 0;
 
-    const agc = ctx.createGain();
-    agc.gain.value = 1;
+  // Keep the dry path audible while the worklet module loads.
+  source.connect(dry);
+  dry.connect(ctx.destination);
 
-    const limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -1.5;
-    limiter.knee.value = 0;
-    limiter.ratio.value = 20;
-    limiter.attack.value = 0;
-    limiter.release.value = 0.15;
+  const chain: Chain = {
+    ctx, video, source, dry, wet, outputAnalyser,
+    outputBuffer: new Float32Array(outputAnalyser.fftSize),
+    worklet: null, enabled: false, options, metrics: null, resetTimer: 0,
+  };
+  chains.set(video, chain);
+  attachedRefs.push(new WeakRef(video));
 
-    const outputAnalyser = ctx.createAnalyser();
-    outputAnalyser.fftSize = 2048;
-    outputAnalyser.smoothingTimeConstant = 0;
+  const resync = () => {
+    resetWorklet(chain);
+    configure(chain);
+  };
+  video.addEventListener("play", () => {
+    if (suspendTimer) {
+      window.clearTimeout(suspendTimer);
+      suspendTimer = 0;
+    }
+    void ctx.resume().catch(() => {});
+    configure(chain);
+  });
+  const onStop = () => {
+    configure(chain);
+    scheduleContextIdleCheck(ctx);
+  };
+  video.addEventListener("pause", onStop);
+  video.addEventListener("ended", onStop);
+  video.addEventListener("volumechange", () => configure(chain));
+  video.addEventListener("seeking", resync);
+  video.addEventListener("seeked", resync);
+  video.addEventListener("emptied", resync);
+  video.addEventListener("loadedmetadata", resync);
+  video.addEventListener("loadstart", resync);
 
-    const dry = ctx.createGain();
-    dry.gain.value = 1;
-    const wet = ctx.createGain();
-    wet.gain.value = 0;
+  try {
+    await loadWorkletModule(ctx);
+  } catch {
+    setState(video, "unsupported");
+    return;
+  }
+  if (!wanted.get(video)) return;
 
-    source.connect(dry);
-    dry.connect(ctx.destination);
-    source.connect(agc);
-    agc.connect(limiter);
-    limiter.connect(outputAnalyser);
-    outputAnalyser.connect(wet);
-    wet.connect(ctx.destination);
-
-    const chain: Chain = {
-      ctx, video, source, agc, limiter, inputAnalyser, outputAnalyser, dry, wet,
-      inputBuffer: new Float32Array(inputAnalyser.fftSize),
-      outputBuffer: new Float32Array(outputAnalyser.fftSize),
-      timer: 0, resetTimer: 0, enabled: false, initialized: false,
-      levelDb: null, lastGainDb: 0, inputDb: null, outputDb: null, outputPeakDb: null, desiredDb: 0,
-    };
-    chains.set(video, chain);
-    attachedRefs.push(new WeakRef(video));
-    video.addEventListener("play", () => {
-      if (suspendTimer) {
-        window.clearTimeout(suspendTimer);
-        suspendTimer = 0;
-      }
-      void ctx.resume().catch(() => {});
-      if (chain.enabled) startTimer(chain);
+  try {
+    const worklet = new AudioWorkletNode(ctx, WORKLET_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      channelCount: 2,
+      channelCountMode: "explicit",
     });
-    const onStop = () => {
-      stopTimer(chain);
+    worklet.port.onmessage = (event) => {
+      const metrics = readMetrics(event.data);
+      if (metrics) chain.metrics = metrics;
+    };
+    worklet.onprocessorerror = () => {
+      chain.worklet = null;
+      setState(video, "unsupported");
+      ramp(chain.dry.gain, 1, ctx);
+      ramp(chain.wet.gain, 0, ctx);
+      try { worklet.disconnect(); } catch { /* already detached */ }
       scheduleContextIdleCheck(ctx);
     };
-    video.addEventListener("pause", onStop);
-    video.addEventListener("ended", onStop);
-    video.addEventListener("loadstart", () => resetAnalysis(chain));
+
+    source.connect(worklet);
+    worklet.connect(outputAnalyser);
+    outputAnalyser.connect(wet);
+    wet.connect(ctx.destination);
+    chain.worklet = worklet;
     enableChain(chain);
   } catch {
     setState(video, "unsupported");
+    scheduleContextIdleCheck(ctx);
   }
 }
 
 /** Apply the persisted preference to a video element. Creating the source node is lazy. */
-export function setBalanceVolume(video: HTMLVideoElement | null, enabled: boolean) {
+export function setBalanceVolume(
+  video: HTMLVideoElement | null,
+  enabled: boolean,
+  options?: BalanceVolumeOptions,
+) {
   if (!video) return;
+  const normalized = normalizeOptions(options);
   wanted.set(video, enabled);
+  desiredOptions.set(video, normalized);
+
+  const existing = chains.get(video);
   if (!enabled) {
     clearPending(video);
-    const chain = chains.get(video);
-    if (chain) disableChain(chain);
+    if (existing) disableChain(existing);
     else setState(video, "off");
     return;
   }
@@ -413,7 +460,14 @@ export function setBalanceVolume(video: HTMLVideoElement | null, enabled: boolea
   const eligibility = canSampleElementAudio(video);
   if (eligibility === "opaque") {
     clearPending(video);
+    if (existing) disableChain(existing);
     setState(video, "unsupported");
+    return;
+  }
+
+  if (existing) {
+    existing.options = normalized;
+    enableChain(existing);
     return;
   }
 
@@ -421,10 +475,10 @@ export function setBalanceVolume(video: HTMLVideoElement | null, enabled: boolea
   if (!ctx) { setState(video, "unsupported"); return; }
   setState(video, "pending");
   const activate = () => {
-    if (wanted.get(video) && ctx.state === "running") attach(video, ctx);
+    if (wanted.get(video) && ctx.state === "running") void attach(video, ctx, normalized);
   };
   void ctx.resume().then(activate).catch(() => { /* Wait for the next explicit gesture. */ });
-  if (ctx.state !== "running") waitForGesture(video, ctx);
+  if (ctx.state !== "running") waitForGesture(video, ctx, normalized);
   else activate();
 }
 
@@ -439,14 +493,16 @@ export function getBalanceVolumeMetrics(video: HTMLVideoElement | null): Balance
       reductionDb: 0,
     };
   }
+  const output = levelsFromBuffer(chain.outputAnalyser, chain.outputBuffer);
+  const metrics = chain.metrics;
   return {
     state: (video.dataset.balanceVolume as BalanceVolumeMetrics["state"]) ?? "off",
-    inputDb: chain.inputDb,
-    outputDb: chain.outputDb,
-    outputPeakDb: chain.outputPeakDb,
-    levelDb: chain.levelDb,
-    desiredDb: chain.desiredDb,
-    gainDb: 20 * Math.log10(chain.agc.gain.value + 1e-7),
-    reductionDb: chain.limiter.reduction,
+    inputDb: metrics?.inputDb ?? null,
+    outputDb: output.rmsDb,
+    outputPeakDb: output.peakDb,
+    levelDb: metrics?.inputDb ?? null,
+    desiredDb: metrics?.desiredDb ?? 0,
+    gainDb: metrics?.gainDb ?? 0,
+    reductionDb: metrics?.reductionDb ?? 0,
   };
 }
