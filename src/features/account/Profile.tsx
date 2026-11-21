@@ -11,6 +11,7 @@ import { useContentPreferences } from "../../shared/model/contentPreferences";
 import { CollectionLink, CollectionLinks } from "../../shared/ui/CollectionLink";
 import { IChevR, IClock, IHeart, ILogout, ISettings, IStar, IUser, IUserF } from "../../shared/ui/icons";
 import { tr } from "../../shared/i18n";
+import { useTabSwipe } from "../../shared/ui/hooks/useTabSwipe";
 
 /* Account changes discard cached details synchronously, before another account can paint. */
 export default function Profile({ wide, active = true }: { wide: boolean; active?: boolean }) {
@@ -53,6 +54,18 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const removalPending = useRef(false);
+  const tabIndex = tab === "fav" ? 0 : 1;
+  const tabSwipe = useTabSwipe<HTMLDivElement>({
+    rootRef: scrollRef,
+    tabIndex,
+    tabCount: 2,
+    onTabChange: index => {
+      const next = index === 0 ? "fav" : "history";
+      if (next === tab) return;
+      setTab(next);
+      setSelectedIds([]);
+    },
+  });
   const [blockedPrompt, setBlockedPrompt] = useState<{
     id: number; kind: "video" | "post"; reason: string; removableFav: boolean;
   } | null>(null);
@@ -266,7 +279,8 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
         )}
       </div>
 
-      <div ref={scrollRef} className="ios-page-body flex-1 scroll-y pt-2 pb-24">
+      <div ref={scrollRef} {...tabSwipe} style={{ touchAction: "pan-y" }}
+        className="ios-page-body flex-1 scroll-y pt-2 pb-24">
         {/* 资料卡：已登录 / 未登录（点开登录抽屉） */}
         {user ? (
           <Surface className="ios-account-card flex items-center gap-3.5 a-rise">
@@ -319,7 +333,7 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
         )}
 
         {/* 我的内容 */}
-        <SegmentedControl className="mt-4" aria-label={tr("我的内容")} activeIndex={tab === "fav" ? 0 : 1}>
+        <SegmentedControl className="mt-4" aria-label={tr("我的内容")} activeIndex={tabIndex}>
           {([["fav", tr("我的收藏")], ["history", tr("观看历史")]] as const).map(([k, l]) => (
             <Button aria-pressed={tab === k} key={k} onClick={() => { setTab(k); setSelectedIds([]); }}>{l}</Button>
           ))}
