@@ -23,7 +23,7 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
   const {
     user, setLoginOpen, logout, history, favs, postFavs, favEpCounts,
     seedFavoriteEpisodes, ackFavoriteEpisodes, setCollected, toast,
-    clearHistory, removeHistory, push, accountSync, syncAccount, accountGeneration,
+    removeHistory, push, accountSync, syncAccount, accountGeneration,
   } = useStore();
   const [tab, setTab] = useState<"fav" | "history">("fav");
   const [favKind, setFavKind] = useState<"video" | "post">("video");
@@ -44,10 +44,6 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const logoutPending = useRef(false);
-  const [clearOpen, setClearOpen] = useState(false);
-  const [clearBusy, setClearBusy] = useState(false);
-  const [clearError, setClearError] = useState("");
-  const clearing = useRef(false);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -189,27 +185,13 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
     }
   };
 
-  const clearWatchHistory = async () => {
-    if (clearing.current) return;
-    clearing.current = true;
-    setClearBusy(true); setClearError("");
-    try {
-      await clearHistory();
-      if (mounted.current) setClearOpen(false);
-    } catch (error) {
-      if (mounted.current) setClearError(error instanceof Error ? error.message : tr("清空失败，观看记录已保留，请重试"));
-    } finally {
-      clearing.current = false;
-      if (mounted.current) setClearBusy(false);
-    }
-  };
-
   const toggleSelection = (id: number) => {
     setSelectedIds(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   };
   const beginSelection = (id: number) => {
     setSelectedIds(current => current.includes(id) ? current : [...current, id]);
   };
+  const selectAll = () => setSelectedIds([...ids]);
   const confirmRemoveSelected = async () => {
     if (removalPending.current || !selectedIds.length) return;
     const generation = accountGeneration();
@@ -424,10 +406,6 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
           {cardsCount > 0 && loading && <div className="flex justify-center py-3"><Loader label={tr("加载更多内容")} /></div>}
           {ids.length > 0 && <p role="status" className="mt-3 text-[12px] text-mut">{tr("已显示 {0} / {1} 项{2}", cardsCount, ids.length, user ? tr("账号记录") : tr("本机记录"))}</p>}
           {hasMore && <div ref={sentinelRef} className="h-4" aria-hidden="true" />}
-          {tab === "history" && history.length > 0 && (
-            <Button disabled={clearBusy} aria-busy={clearBusy} onClick={() => { setClearError(""); setClearOpen(true); }} className="mt-3 w-full h-9 rounded-(--r-ctl) bg-s3 text-[13px] text-mut pressable">{clearBusy ? tr("正在清空…") : tr("清空观看历史")}</Button>
-          )}
-          {clearError && !clearOpen && <p role="alert" className="mt-2 text-[13px] text-danger">{clearError}</p>}
         </div>
 
         <div className="text-center text-[12px] text-dim mt-5">{tr("HGhubX {0} · {1} 客户端", APP_VERSION, platform === "android" ? "Android" : platform === "ios" ? "iOS" : platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows")}</div>
@@ -485,19 +463,6 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
             <Button variant="secondary" disabled={logoutBusy} onClick={() => setLogoutOpen(false)} className="flex-1">{tr("取消")}</Button>
             <Button variant="danger" disabled={logoutBusy} onClick={() => void confirmLogout()} className="flex-1 rounded-(--r-ctl) px-3">
               {logoutBusy ? tr("正在退出…") : tr("确认退出")}
-            </Button>
-          </div>
-        </div>
-      </Modal>
-      <Modal open={clearOpen} onClose={() => { if (!clearing.current) setClearOpen(false); }} label={tr("清空观看历史")}>
-        <div className="p-5">
-          <h2 className="text-[18px] font-bold">{tr("清空观看历史")}</h2>
-          <p className="mt-2 text-[14px] text-mut">{tr("确认清空全部观看历史？{0}此操作无法撤销，收藏不会受影响。", user ? tr("当前账号的云端观看历史与本机缓存都会被清除。") : tr("本机游客观看历史会被清除。"))}</p>
-          {clearError && <p role="alert" className="mt-3 text-[13px] text-danger">{clearError}</p>}
-          <div className="mt-4 flex gap-3">
-            <Button variant="secondary" disabled={clearBusy} onClick={() => setClearOpen(false)} className="flex-1">{tr("取消")}</Button>
-            <Button variant="danger" disabled={clearBusy} aria-busy={clearBusy} onClick={() => void clearWatchHistory()} className="flex-1 rounded-(--r-ctl) px-3">
-              {clearBusy ? tr("正在清空…") : tr("确认清空")}
             </Button>
           </div>
         </div>
