@@ -16,7 +16,7 @@ const scriptScenarios = {
   tv: { script: "test-tv-remote.mjs", timeout: 480000, metrics: { transport: "mock Tauri IPC; actual TV bootstrap, worker, library and player" } },
   "post-flicker": { script: "test-post-flicker.mjs", timeout: 240000, metrics: { transport: "mock Tauri IPC; real PostDetail/AppProvider/Player; local HLS fixture" } },
 };
-const ALL_SCENARIOS = ["seek", "legacy", "lifecycle", "gesture", "proxy", "portrait-fit", "episode-toast", "ambient", "ios-native", "recovery", "review", "tv", "post-flicker"];
+const ALL_SCENARIOS = ["seek", "legacy", "lifecycle", "gesture", "proxy", "portrait-fit", "episode-toast", "ambient", "balance-volume", "ios-native", "recovery", "review", "tv", "post-flicker"];
 const { values: args } = parseArgs({ options: {
   "media-dir": { type: "string" }, output: { type: "string" }, "browser-executable": { type: "string" },
   scenarios: { type: "string", default: "seek,legacy,lifecycle,gesture,proxy,portrait-fit" }, help: { type: "boolean" },
@@ -77,6 +77,22 @@ async function serveMedia(dir) {
 const getLogs = page => page.evaluate(async () => { await window.playerSeekFixture.flushLogs(); return window.playerSeekFixture.logs; });
 // 本地 VOD HLS fixture：testsrc2 + 正弦音轨。size 决定横屏（320x180）或竖屏（360x640）源。
 const generateHlsFixture = (dir, size) => execFileSync(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${size}:rate=15`, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "90", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", "-hls_segment_filename", join(dir, "seg%03d.ts"), join(dir, "list.m3u8")], { timeout: 60000, stdio: "pipe" });
+// Two steady tones about 36 dB apart: the audio graph must bring both to the same output RMS.
+function balanceFixtureWav(seconds = 24, sampleRate = 22050) {
+  const frames = sampleRate * seconds;
+  const data = Buffer.alloc(44 + frames * 2);
+  data.write("RIFF", 0); data.writeUInt32LE(36 + frames * 2, 4); data.write("WAVE", 8);
+  data.write("fmt ", 12); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20);
+  data.writeUInt16LE(1, 22); data.writeUInt32LE(sampleRate, 24); data.writeUInt32LE(sampleRate * 2, 28);
+  data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write("data", 36);
+  data.writeUInt32LE(frames * 2, 40);
+  for (let i = 0; i < frames; i += 1) {
+    const amplitude = i < sampleRate * 10 ? 0.012 : 0.8;
+    const sample = Math.sin((2 * Math.PI * 440 * i) / sampleRate) * amplitude;
+    data.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample * 32767))), 44 + i * 2);
+  }
+  return data.toString("base64");
+}
 async function waitLog(page, event, source) {
   await page.waitForFunction(({ event, source }) => window.playerSeekFixture.logs.some(e => e.event === event && (!source || e.data.source === source)), { event, source });
   return getLogs(page);
@@ -91,6 +107,58 @@ async function loadPlayer(page, legacy = false, extra = "") {
   await page.goto(`${report.ui}/tests/player-seek.html?diagnostics=1&proxy=${encodeURIComponent(report.media)}${legacy ? "&legacy=1" : ""}${extra}`);
   await page.waitForFunction(() => document.querySelector("video")?.currentTime > 1);
 }
+async function balanceVolumeChecks(page) {
+  // The fixture is seeded with balanceVolume enabled. The first gesture resumes
+  // the shared AudioContext and attaches the media-element source exactly once.
+  await page.addInitScript(() => {
+    localStorage.setItem("hghubx_app_v1", JSON.stringify({ balanceVolume: true }));
+    localStorage.setItem("hghubx_mobile_hold_guide_v1", "1");
+  });
+  await loadPlayer(page);
+  await page.getByRole("button", { name: "取消静音", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("video")?.dataset.balanceVolume === "on", null, { timeout: 10000 });
+  assert.equal(await page.locator("video").evaluate(video => video.dataset.balanceVolume), "on", "Balance volume must attach after the first user gesture");
+  await page.evaluate(() => window.playerSeekFixture.setActive(false));
+  await page.waitForFunction(() => document.querySelector("video")?.dataset.balanceVolume === "off");
+  await page.evaluate(() => window.playerSeekFixture.setActive(true));
+  await page.waitForFunction(() => document.querySelector("video")?.dataset.balanceVolume === "on");
+
+  // Real graph check: a quiet tone and a loud tone must converge to the same output level.
+  await page.goto(`${report.ui}/tests/balance-probe.html`);
+  await page.waitForFunction(() => window.__balanceProbe);
+  assert.equal(await page.evaluate(src => window.__balanceProbe.checkOpaqueGuard(src), `${report.media}/hls`), "unsupported",
+    "Cross-origin non-CORS media must stay on native audio instead of producing silence");
+  await page.evaluate(src => window.__balanceProbe.load(src), `data:audio/wav;base64,${balanceFixtureWav()}`);
+  await page.click("#start");
+  await page.waitForFunction(() => window.__balanceProbe.isStarted());
+  await page.evaluate(() => window.__balanceProbe.seek(3));
+  await page.waitForTimeout(4500);
+  const quiet = await page.evaluate(() => window.__balanceProbe.metrics());
+  await page.evaluate(() => window.__balanceProbe.seek(12));
+  await page.waitForTimeout(4500);
+  const loud = await page.evaluate(() => window.__balanceProbe.metrics());
+  await page.evaluate(() => window.__balanceProbe.setVolume(0.2));
+  await page.waitForTimeout(2500);
+  const lowered = await page.evaluate(() => window.__balanceProbe.metrics());
+
+  assert.equal(quiet.state, "on", "Probe graph must be active");
+  assert.ok(quiet.outputDb > -22 && quiet.outputDb < -15, `Quiet tone output ${quiet.outputDb} dB is outside the leveling target`);
+  assert.ok(Math.abs(loud.outputDb - quiet.outputDb) <= 1.5, `Quiet ${quiet.outputDb} dB and loud ${loud.outputDb} dB must converge within 1.5 dB`);
+  assert.ok(quiet.desiredDb > 10, "Quiet source must receive substantial boost");
+  assert.ok(loud.desiredDb < 0, "Loud source must be attenuated");
+  assert.ok(quiet.outputPeakDb < -1.4 && loud.outputPeakDb < -1.4, "Output peaks must stay under the limiter ceiling");
+  assert.ok(lowered.outputDb <= loud.outputDb - 12 && lowered.outputDb >= loud.outputDb - 17, `Manual volume must stay authoritative: ${loud.outputDb} -> ${lowered.outputDb}`);
+  return {
+    attached: true, state: "on",
+    quiet_db: Math.round(quiet.outputDb * 10) / 10,
+    loud_db: Math.round(loud.outputDb * 10) / 10,
+    lowered_db: Math.round(lowered.outputDb * 10) / 10,
+    quiet_gain_db: Math.round(quiet.desiredDb * 10) / 10,
+    loud_gain_db: Math.round(loud.desiredDb * 10) / 10,
+  };
+}
+
+
 async function speedMenuKeyboardChecks(page, paused) {
   const trigger = page.getByRole("button", { name: "倍速", exact: true });
   const menu = page.getByRole("menu", { name: "播放速度", exact: true });
@@ -1007,7 +1075,7 @@ try {
       }
       continue;
     }
-    const mobileContext = name === "gesture" || name === "portrait-fit" || name === "episode-toast" || name === "ambient";
+    const mobileContext = name === "gesture" || name === "portrait-fit" || name === "episode-toast" || name === "ambient" || name === "balance-volume";
     const context = await browser.newContext({ ...(mobileContext ? {userAgent:"Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 Version/17.1 Mobile/15E148 Safari/604.1",hasTouch:true} : {}), viewport: name === "portrait-fit" || name === "episode-toast" || name === "ambient" ? { width: 390, height: 844 } : { width: 1000, height: 900 } });
     await context.exposeBinding("collectPlaybackLogs", (_source, entries) => {
       for (const e of entries) jsonl(join(dir, "playback.jsonl"), { ts: e.data.at, event: `web.${e.event}`, data: e.data, transport: "browser-fixture" });
@@ -1031,7 +1099,7 @@ try {
     const result = { name, status: "running", started: new Date().toISOString() }; report.cases.push(result);
     let deadline;
     try {
-      const action = name === "recovery" ? explicitRecoveryCheck(page) : name === "proxy" ? proxyRecoveryCheck(page) : name === "gesture" ? gestureChecks(page) : name === "portrait-fit" ? portraitFitChecks(page, dir) : name === "episode-toast" ? episodeToastChecks(page) : name === "ambient" ? ambientGlowChecks(page) : name === "seek" || name === "legacy" ? seekChecks(page, name === "legacy") : lifecycleCheck(page);
+      const action = name === "recovery" ? explicitRecoveryCheck(page) : name === "proxy" ? proxyRecoveryCheck(page) : name === "gesture" ? gestureChecks(page) : name === "portrait-fit" ? portraitFitChecks(page, dir) : name === "episode-toast" ? episodeToastChecks(page) : name === "ambient" ? ambientGlowChecks(page) : name === "balance-volume" ? balanceVolumeChecks(page) : name === "seek" || name === "legacy" ? seekChecks(page, name === "legacy") : lifecycleCheck(page);
       result.metrics = await Promise.race([action, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Scenario exceeded 45 seconds")), 45000); })]);
       assert.deepEqual(pageErrors, [], "Browser script errors");
       assert.deepEqual(externalRequests, [], "Unexpected external network requests");

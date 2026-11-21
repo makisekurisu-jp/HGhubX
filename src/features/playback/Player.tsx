@@ -25,13 +25,14 @@ type Props = {
   onPlaying?: () => void;
   onTogglePlay?: (playing: boolean) => void;
   onToggleMute?: () => void;
+  balanceVolume?: boolean;
   controls?: boolean;
   className?: string;
   diagnosticContext?: Record<string, unknown>;
 };
 
 export default function Player({
-  src, scopeKey, poster, autoPlay, active = true, muted = false, volume = 1, loop = false, ambientGlow = false, onEnded, onPlaying,
+  src, scopeKey, poster, autoPlay, active = true, muted = false, volume = 1, loop = false, ambientGlow = false, balanceVolume = false, onEnded, onPlaying,
   onTogglePlay, onToggleMute, controls = true, className = "", diagnosticContext = {},
 }: Props) {
   const surfaceRef = useRef<VideoHandle>(null);
@@ -121,6 +122,7 @@ export default function Player({
             rate={rate}
             loop={loop}
             ambientGlow={ambientGlow}
+            balanceVolume={balanceVolume}
             diagnosticContext={{ view: "post_detail", ...diagnosticContext }}
             onClick={toggle}
             onTime={setTime}

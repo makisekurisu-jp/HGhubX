@@ -29,7 +29,9 @@
   [`useInlinePlayerFullscreen.tsx`](../../src/features/playback/useInlinePlayerFullscreen.tsx)、
   [`src/shared/lib/fullscreen.ts`](../../src/shared/lib/fullscreen.ts)、
   [`mediaTransport.ts`](../../src/features/playback/mediaTransport.ts)、
-  [`mediaErrors.ts`](../../src/features/playback/mediaErrors.ts)。
+  [`mediaErrors.ts`](../../src/features/playback/mediaErrors.ts)、
+  [`AmbientGlow.tsx`](../../src/features/playback/AmbientGlow.tsx)、
+  [`balanceVolume.ts`](../../src/features/playback/balanceVolume.ts)。
 - 后端传输：[`src-tauri/src/ios_media_http.rs`](../../src-tauri/src/ios_media_http.rs)、
   [`src-tauri/src/linux_http.rs`](../../src-tauri/src/linux_http.rs)、
   [`src-tauri/src/media/mod.rs`](../../src-tauri/src/media/mod.rs)、
@@ -99,6 +101,7 @@
   固定为 none，避免原生 pan-y 把视觉横滑取消掉。
 - 媒体错误：hls fatal 显示 `type/details/status`，原生错误走
   `mediaErrorMessage`；手动重试走同一个 `useProxyPlaybackRecovery` 路径。
+- 移动端「平衡音量」（`balanceVolume.ts`，`hghubx_app_v1.balanceVolume`，默认 `false`）：仅在支持 MSE + Web Audio 的移动端环境展示入口并启用；首次显式手势解锁 `AudioContext` 后挂接输入侧原始 RMS 分析、扣除 `video.volume` 偏移的慢速 AGC 与峰值限幅器；跨源无 CORS / 原生非 `blob:` 源不挂接 `MediaElementAudioSourceNode`（标记 `unsupported`），页面失活或暂停时停止采样定时器并在无在播元素时挂起 `AudioContext`。
 
 ## 约束与失败行为
 

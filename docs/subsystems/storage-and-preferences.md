@@ -50,7 +50,7 @@
 
 | 运行期键 | 旧键 | 内容 |
 | --- | --- | --- |
-| `hghubx_app_v1` | `hghub_app_v1` | 游客偏好、收藏、关注、观看记录、收藏已知集数基线（`favEpCounts`）、搜索历史、音量、`muteOnStartup`、`swipeEp`、`preferHevc`、`fsIdleSecs`、`startupTab` |
+| `hghubx_app_v1` | `hghub_app_v1` | 游客偏好、收藏、关注、观看记录、收藏已知集数基线（`favEpCounts`）、搜索历史、音量、`muteOnStartup`、`swipeEp`、`preferHevc`、`balanceVolume`、`fsIdleSecs`、`startupTab`、`ambientGlow` |
 | `hghubx_swipe_ep_v2` | `hghub_swipe_ep_v2` | 上下划切集的一次性迁移标记 |
 | `hghubx_theme` | `hghub_theme` | `light`/`dark`/`system` |
 | `hghubx_locale` | — | 界面语言偏好（`zh-CN`/`zh-TW`/`en`，默认 `zh-CN`） |

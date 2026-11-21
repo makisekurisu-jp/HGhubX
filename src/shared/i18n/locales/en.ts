@@ -790,6 +790,8 @@ const en: Record<string, string> = {
   "；已保留上次榜单": "; previous rankings retained",
   "画面颜色会轻微扩散到黑边，关闭可省电": "Softly extends video colors into black bars; turn off to save battery",
   "微光效果": "Ambient glow",
+  "平衡音量": "Balance volume",
+  "自动压低突然变大的音效，让台词更稳；音乐和现场内容可能被轻微压缩": "Lowers sudden loud effects to keep dialogue steady; music and live audio may be slightly compressed",
 };
 
 export default en;

@@ -14,7 +14,8 @@ import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, tracePlayback, usePla
 import { formatNetDiag, shortVerdict } from "../../shared/diagnostics/netDiagReport";
 import { copyText } from "../../shared/lib/clipboard";
 import { Loader } from "../../shared/ui/ios/effects";
-import { IBack, IBoltF, IBroom, IChevR, ICompress, IGlobe, IHeart, IHome, IInfo, ILink, ILockF, IMoon, IRefresh, ISun, IVolMute } from "../../shared/ui/icons";
+import { isBalanceVolumeSupported } from "../playback/balanceVolume";
+import { IBack, IBoltF, IBroom, IChevR, ICompress, IGlobe, IHeart, IHome, IInfo, ILink, ILockF, IMoon, IRefresh, ISun, IVol, IVolMute } from "../../shared/ui/icons";
 import { LOCALE_OPTIONS, N_, setLocale, tr, useLocale, type Locale } from "../../shared/i18n";
 
 const SETTING_GROUPS = [N_("外观"), N_("播放"), N_("内容偏好"), N_("本地数据"), N_("网络"), N_("播放诊断"), N_("其他")] as const;
@@ -25,7 +26,7 @@ type SettingGroup = typeof SETTING_GROUPS[number];
 export default function Settings({ onBack, initialSection }: { onBack: () => void; wide: boolean; initialSection?: "内容偏好" }) {
   const locale = useLocale();
   const [localeBusy, setLocaleBusy] = useState(false);
-  const { theme, themePreference, setTheme, favs, history, muteOnStartup, setMuteOnStartup, preferHevc, setPreferHevc, fsIdleSecs, setFsIdleSecs, startupTab, setStartupTab, ambientGlow, setAmbientGlow, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
+  const { theme, themePreference, setTheme, favs, history, muteOnStartup, setMuteOnStartup, preferHevc, setPreferHevc, balanceVolume, setBalanceVolume, fsIdleSecs, setFsIdleSecs, startupTab, setStartupTab, ambientGlow, setAmbientGlow, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
   const [about, setAbout] = useState(false);
   const [agreementOpen, setAgreementOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
@@ -197,6 +198,14 @@ export default function Settings({ onBack, initialSection }: { onBack: () => voi
               </div>
               <Toggle desktop on={ambientGlow} onChange={setAmbientGlow} label={tr("微光效果")} />
             </div>
+            {isMobile && isBalanceVolumeSupported() && <div className="ios-settings-row">
+              <span className="ios-setting-icon"><IVol size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[14px] text-on">{tr("平衡音量")}</div>
+                <div className="text-[12px] text-mut">{tr("自动压低突然变大的音效，让台词更稳；音乐和现场内容可能被轻微压缩")}</div>
+              </div>
+              <Toggle desktop on={balanceVolume} onChange={setBalanceVolume} label={tr("平衡音量")} />
+            </div>}
             {isMobile && <div className="ios-settings-row flex-wrap">
               <span className="ios-setting-icon"><ICompress size={16} /></span>
               <div className="flex-1 min-w-0">

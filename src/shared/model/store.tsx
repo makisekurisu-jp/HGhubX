@@ -76,6 +76,8 @@ type Persist = GuestData & {
   swipeEp: boolean;
   /** 优先高清：有 HEVC 就用 HEVC，播不了自动回退标准 */
   preferHevc: boolean;
+  /** App-level volume leveling: compress peaks and use slow AGC to level sources. */
+  balanceVolume: boolean;
   /** 移动全屏控件无操作自动隐藏秒数：0=不自动隐藏（#146-3） */
   fsIdleSecs: number;
   /** 启动时打开的页面：默认首页；选非首页可避免开机自动播放污染观看历史（#180-1） */
@@ -88,7 +90,7 @@ const LS = STORAGE_KEYS.app;
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
   muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false,
-  fsIdleSecs: 3, startupTab: "home", ambientGlow: true,
+  balanceVolume: false, fsIdleSecs: 3, startupTab: "home", ambientGlow: true,
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -131,7 +133,8 @@ function loadPersist(): Persist {
     const fsIdleSecs = [0, 3, 5, 10].includes(p.fsIdleSecs) ? p.fsIdleSecs : DEFAULTS.fsIdleSecs;
     const startupTab: Tab = (["home", "search", "category", "profile"] as Tab[]).includes(p.startupTab) ? p.startupTab : "home";
     const ambientGlow = p.ambientGlow !== false;
-    return { ...p, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, fsIdleSecs, startupTab, ambientGlow, history: normalizeHistory(p.history) };
+    const balanceVolume = p.balanceVolume === true;
+    return { ...p, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, balanceVolume, fsIdleSecs, startupTab, ambientGlow, history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
   }
@@ -210,6 +213,7 @@ type Store = {
   muteOnStartup: boolean; setMuteOnStartup: (on: boolean) => void;
   swipeEp: boolean; setSwipeEp: (on: boolean) => void;
   preferHevc: boolean; setPreferHevc: (on: boolean) => void;
+  balanceVolume: boolean; setBalanceVolume: (on: boolean) => void;
   fsIdleSecs: number; setFsIdleSecs: (s: number) => void;
   startupTab: Tab; setStartupTab: (t: Tab) => void;
   ambientGlow: boolean; setAmbientGlow: (on: boolean) => void;
@@ -505,6 +509,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setPreferHevc = useCallback((on: boolean) => {
     setP((s) => ({ ...s, preferHevc: on }));
   }, []);
+  const setBalanceVolume = useCallback((on: boolean) => {
+    setP((s) => ({ ...s, balanceVolume: on }));
+  }, []);
   const setFsIdleSecs = useCallback((secs: number) => {
     setP((s) => ({ ...s, fsIdleSecs: [0, 3, 5, 10].includes(secs) ? secs : 3 }));
   }, []);
@@ -537,6 +544,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     muteOnStartup: p.muteOnStartup, setMuteOnStartup,
     swipeEp: p.swipeEp, setSwipeEp,
     preferHevc: p.preferHevc, setPreferHevc,
+    balanceVolume: p.balanceVolume, setBalanceVolume,
     fsIdleSecs: p.fsIdleSecs, setFsIdleSecs,
     startupTab: p.startupTab, setStartupTab,
     ambientGlow: p.ambientGlow, setAmbientGlow,
@@ -545,7 +553,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     get toasts() { return toastList; }, toast, lineEpoch,
   }), [theme, themePreference, setTheme, tab, setTab, stack, push, openRootPage, pop, user, loginOpen, logout,
     p, account,
-    setMuted, setMuteOnStartup, setSwipeEp, setPreferHevc, setFsIdleSecs, setStartupTab, setAmbientGlow, setVolume, addSearch, removeSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
+    setMuted, setMuteOnStartup, setSwipeEp, setPreferHevc, setBalanceVolume, setFsIdleSecs, setStartupTab, setAmbientGlow, setVolume, addSearch, removeSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toast, lineEpoch, theater, setTheater, fs, setFs, clean, setClean, locked, setLocked]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
