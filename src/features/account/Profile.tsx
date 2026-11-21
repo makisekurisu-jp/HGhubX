@@ -23,7 +23,7 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
   const {
     user, setLoginOpen, logout, history, favs, postFavs, favEpCounts,
     seedFavoriteEpisodes, ackFavoriteEpisodes, setCollected, toast,
-    removeHistory, push, accountSync, syncAccount, accountGeneration,
+    clearHistory, removeHistory, push, accountSync, syncAccount, accountGeneration,
   } = useStore();
   const [tab, setTab] = useState<"fav" | "history">("fav");
   const [favKind, setFavKind] = useState<"video" | "post">("video");
@@ -191,6 +191,7 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
   const beginSelection = (id: number) => {
     setSelectedIds(current => current.includes(id) ? current : [...current, id]);
   };
+  const allSelected = ids.length > 0 && ids.every((id) => selectedIds.includes(id));
   const selectAll = () => setSelectedIds([...ids]);
   const confirmRemoveSelected = async () => {
     if (removalPending.current || !selectedIds.length) return;
@@ -203,7 +204,8 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
     try {
       if (!current()) return;
       if (tab === "history") {
-        await removeHistory(targets);
+        if (history.length > 0 && history.every((h) => targets.includes(h.id))) await clearHistory();
+        else await removeHistory(targets);
         if (!current()) return;
       } else {
         const failed: number[] = [];
@@ -319,7 +321,8 @@ function ProfileContent({ wide, active }: { wide: boolean; active: boolean }) {
 
         {selectionMode && <div role="region" aria-label={tr("批量管理")} className="sticky top-0 z-20 -mx-1 mt-2 flex items-center gap-2 bg-bg/95 px-1 py-2 text-[13px] backdrop-blur">
           <span className="font-semibold text-on">{tr("已选 {0} 项", selectedIds.length)}</span>
-          <Button className="ml-auto px-2 text-primary" onClick={() => { setSelectedIds([]); setRemoveError(""); }}>{tr("取消")}</Button>
+          <Button disabled={allSelected} className="ml-auto px-2 text-primary disabled:opacity-40" onClick={selectAll}>{tr("全选")}</Button>
+          <Button className="px-2 text-primary" onClick={() => { setSelectedIds([]); setRemoveError(""); }}>{tr("取消")}</Button>
           <Button variant="danger" className="rounded-(--r-ctl) px-3" onClick={() => { setRemoveError(""); setRemoveOpen(true); }}>{tr("移除")}</Button>
         </div>}
 
