@@ -7,7 +7,7 @@ import { chromium } from "playwright-core";
 import { installFixture } from "./fixtures/app-ui.mjs";
 
 // 两条契约的真实浏览器回归（mock Tauri IPC，不访问上游网络）：
-//   1. 所有 toast 共用一张卡片：快速同 tag 触发原地替换并重置计时，跨 tag 也不堆叠。
+//   1. 同 tag toast（如 playback-hint 统一承载播放提示）原地替换 + 重置计时；无 tag 仍正常堆叠。
 //   2. 宽屏 .ios-page 标题头栏与滚动体限宽居中、两侧留白对称；窄屏仍全宽。
 // 探针页 tests/ui-feedback.html 挂载真实 Profile（.ios-page 消费者）、ToastHost 与 store。
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -126,26 +126,33 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".a-toast").length === 0);
   report.passed.push("toast-ttl-reset");
 
-  // ---- 契约 2：所有提示共用一张卡片，跨 tag 也不堆叠 ----
+  // ---- 契约 1：播放提示共用 playback-hint 单槽，无 tag 普通提示仍保留堆叠 ----
   await page.evaluate(() => {
-    window.uiFeedbackProbe.toast("普通提示 A", "info");
-    window.uiFeedbackProbe.toast("普通提示 B", "ok");
-    window.uiFeedbackProbe.toast("已锁定屏幕", "info", "screen-lock");
-    window.uiFeedbackProbe.toast("第 5 集 / 24", "info", "episode");
-    window.uiFeedbackProbe.toast("上下划切集已开启", "info", "swipe-toggle");
+    window.uiFeedbackProbe.toast("已锁定屏幕", "info", "playback-hint");
+    window.uiFeedbackProbe.toast("第 5 集 / 24", "info", "playback-hint");
+    window.uiFeedbackProbe.toast("上下划切集已开启", "info", "playback-hint");
   });
   await page.waitForFunction(() => document.querySelectorAll(".a-toast").length === 1);
-  assert.equal(await toastCount(), 1, "不同来源的提示也只应保留一张卡片");
+  assert.equal(await toastCount(), 1, "播放提示共用 playback-hint 时只保留一张卡片");
   const latest = await page.evaluate(() => {
     const list = window.uiFeedbackProbe.toasts();
     return { count: list.length, msg: list[0]?.msg, text: document.querySelector(".a-toast")?.textContent ?? "" };
   });
   assert.equal(latest.count, 1);
   assert.equal(latest.msg, "上下划切集已开启");
-  assert.ok(latest.text.includes("上下划切集已开启"), `卡片应换成最后一条提示：${latest.text}`);
+  assert.ok(latest.text.includes("上下划切集已开启"), `卡片应换成最后一条播放提示：${latest.text}`);
+  await sleep(2400);
+  await page.waitForFunction(() => document.querySelectorAll(".a-toast").length === 0);
+
+  await page.evaluate(() => {
+    window.uiFeedbackProbe.toast("普通提示 A", "info");
+    window.uiFeedbackProbe.toast("普通提示 B", "ok");
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".a-toast").length === 2);
+  assert.equal(await toastCount(), 2, "无 tag 提示应各自堆叠");
   await page.screenshot({ path: join(output, "toast.png") });
   report.toast.latest = latest;
-  report.passed.push("toast-single-slot-cross-tag");
+  report.passed.push("toast-playback-hint-and-untagged-stack");
 
   assert.deepEqual(errors, [], `页面运行时错误：${errors.join(" | ")}`);
   console.log(`PASS: ui-feedback (${report.passed.length} contracts)`);

@@ -60,7 +60,7 @@ export type Toast = {
   icon?: "ok" | "heart" | "star" | "info";
   /** 线路切换专用的结构化内容，有这个就不看 msg */
   line?: { region: "cn" | "intl"; host: string; ms: number };
-  /** 来源标记（playback-hint 等）；显示层始终只有一个槽位，新提示替换旧提示。 */
+  /** 同 tag 的 toast 原地替换（如 playback-hint 统一承载播放状态提示），快速触发不堆叠；无 tag 正常堆叠。 */
   tag?: string;
 };
 
@@ -243,17 +243,15 @@ function scheduleToastRemoval(id: number, durationMs: number) {
   }, durationMs));
 }
 function pushToastItem(item: Omit<Toast, "id">, durationMs: number) {
-  /* One shared slot for every hint. Rapid playback actions (lock, unlock, swipe
-     toggle, episode change, boundary) must replace the current card instead of
-     stacking in different tag groups. */
-  const existing = toastList[toastList.length - 1];
+  const existing = item.tag ? toastList.find((x) => x.tag === item.tag) : undefined;
   if (existing) {
-    updateToasts(() => [{ ...item, id: existing.id }]);
+    // 同 tag：原地换内容并重置计时——不新增卡片、不重放入场动画。
+    updateToasts((prev) => prev.map((x) => (x.id === existing.id ? { ...item, id: existing.id } : x)));
     scheduleToastRemoval(existing.id, durationMs);
     return;
   }
   const id = ++toastNextId;
-  updateToasts(() => [{ ...item, id }]);
+  updateToasts((prev) => [...prev.slice(-2), { ...item, id }]);
   scheduleToastRemoval(id, durationMs);
 }
 const subscribeToasts = (fn: () => void) => {
