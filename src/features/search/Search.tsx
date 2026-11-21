@@ -11,6 +11,7 @@ import { Empty } from "../../shared/ui/ui";
 import { useSearchResults } from "./useSearchResults";
 import { SearchTags } from "./SearchTags";
 import { SearchHistory } from "./SearchHistory";
+import { useRankSwipe } from "./useRankSwipe";
 import { IBack, IChevR, IClose, IFireF, IPlayF, IRefresh, ISearch, ITrophy } from "../../shared/ui/icons";
 import { tr, N_ } from "../../shared/i18n";
 
@@ -339,9 +340,16 @@ export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }
   const err = state?.error ?? "";
   const max = Math.max(1, ...items.map((x) => x.metric_value || 0));
   const meta = RANK_TABS.find((t) => t.k === tab)!;
+  const tabIndex = RANK_TABS.findIndex(item => item.k === tab);
+  const rankSwipe = useRankSwipe({
+    tabIndex,
+    tabCount: RANK_TABS.length,
+    onTabChange: index => setTab(RANK_TABS[index].k),
+  });
 
   return (
-    <div className="ios-page absolute inset-0 bg-bg flex flex-col">
+    <div ref={rankSwipe.rootRef} {...rankSwipe.handlers} style={{ touchAction: "pan-y" }}
+      className="ios-page absolute inset-0 bg-bg flex flex-col">
       <div className="ios-subpage-header shrink-0 relative overflow-hidden" style={{ paddingTop: "var(--sat, 0px)" }}>
         <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(90% 120% at 100% 0%, var(--p-pc) 0%, transparent 60%)", opacity: 0.32 }} />
         <div className="ios-subpage-inner relative">
@@ -356,7 +364,7 @@ export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }
               {loading ? <Loader label={tr("正在更新榜单")} className="w-4 h-4" /> : <IRefresh size={18} />}
             </Button>
           </div>
-          <SegmentedControl className="mb-3" aria-label={tr("榜单类型")} activeIndex={RANK_TABS.findIndex(item => item.k === tab)}>
+          <SegmentedControl className="mb-3" aria-label={tr("榜单类型")} activeIndex={tabIndex}>
             {RANK_TABS.map((t) => (
               <Button aria-pressed={tab === t.k} key={t.k} onClick={() => setTab(t.k)}>{tr(t.label)}</Button>
             ))}

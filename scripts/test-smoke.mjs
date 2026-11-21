@@ -13,6 +13,7 @@ const tests = [
   ["diagnostic-copy", "scripts/test-diagnostic-copy.mjs"],
   ["ui-feedback", "scripts/test-ui-feedback.mjs"],
   ["home-controls", "tests/test-home-controls.mjs"],
+  ["rank-swipe", "scripts/test-rank-swipe.mjs"],
   ["account-sync", "scripts/test-account-sync-empty-state.mjs"],
   ["i18n", "scripts/test-i18n.mjs"],
 ];
