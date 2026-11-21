@@ -12,6 +12,7 @@ import { InplaceSearch } from "../search/InplaceSearch";
 import { Empty } from "../../shared/ui/ui";
 import { IAward, IBack, IChevR, IFilm, IFlame, ILayers, ISearch, ISpark, ITag, ITrophy } from "../../shared/ui/icons";
 import { tr, N_ } from "../../shared/i18n";
+import { useTabSwipe } from "../../shared/ui/hooks/useTabSwipe";
 
 export const CHANNELS = [
   { cate: "ai-duanju", name: N_("AI成人短剧"), Icon: IFilm },
@@ -265,6 +266,23 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
     setErr(null);
     void loadMore(true, originalSort(value), value);
   };
+  const channelTabIndex = cate === "original"
+    ? ORIGINAL_CATES.findIndex(s => s.value === originalCate)
+    : CHANNEL_SORTS.findIndex(s => s.value === serverSort);
+  const channelTabSwipe = useTabSwipe<HTMLDivElement>({
+    rootRef: scrollContainer,
+    tabIndex: channelTabIndex,
+    tabCount: cate === "original" ? ORIGINAL_CATES.length : CHANNEL_SORTS.length,
+    onTabChange: index => {
+      if (cate === "original") {
+        const next = ORIGINAL_CATES[index];
+        if (next) changeOriginalCate(next.value);
+      } else {
+        const next = CHANNEL_SORTS[index];
+        if (next) changeServerSort(next.value);
+      }
+    },
+  });
 
   useEffect(() => {
     setPageItems([]); setPage(0); setPages(1);
@@ -314,7 +332,8 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
           </div>
         )}
       </div>
-      <div ref={scrollContainer} className="flex-1 scroll-y pt-3.5 pb-8" aria-busy={loading}>
+      <div ref={scrollContainer} {...channelTabSwipe} style={{ touchAction: "pan-y" }}
+        className="flex-1 scroll-y pt-3.5 pb-8" aria-busy={loading}>
         {items.length > 0 && replacing && <p role="status" className="mb-3 text-[12px] text-mut">{loading ? tr("正在更新，暂时保留上次结果…") : tr("当前显示上次结果，请重试以更新筛选。")}</p>}
         {items.length > 0 && err && <div role="status" className="mb-3 flex flex-wrap items-center gap-2 text-[12px] text-mut"><span>{err}</span><Button className="px-3 text-primary" onClick={() => void loadMore(replacing)}>{tr("重试")}</Button></div>}
         {items.length ? (
